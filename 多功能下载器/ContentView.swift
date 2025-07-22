@@ -3,8 +3,6 @@
 //
 //  Created by 简哲 on 7/4/25.
 //
-
-// 确保 yt-dlp 从官方仓库进行自动更新（每24小时检测一次）
 // 依赖相关方法和属性定义
 import IOKit
 /// 获取本机的 IOPlatformUUID（硬件唯一标识）
@@ -31,19 +29,62 @@ import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
 import Combine
+
 import UserNotifications
+import AppKit   // For NSAlert
+
+// MARK: - GitHub Release Updater
+fileprivate struct GHRelease: Decodable {
+    let tag_name: String
+    let body: String?
+    let assets: [Asset]
+    struct Asset: Decodable {
+        let browser_download_url: String
+        let name: String
+    }
+}
+
+/// 当前 App 的版本号（CFBundleShortVersionString）
+fileprivate func currentAppVersion() -> String {
+    Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+}
+
+/// 检查 GitHub 最新 Release；若发现新版本则弹窗并跳转下载
+fileprivate func checkForUpdates(owner: String = "mjk0108",
+                                 repo: String = "MinimalDownloader",
+                                 language: String = "zh") {
+    guard let api = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases/latest") else { return }
+
+    URLSession.shared.dataTask(with: api) { data, _, _ in
+        guard let data = data,
+              let rel  = try? JSONDecoder().decode(GHRelease.self, from: data) else { return }
+
+        let latest  = rel.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let current = currentAppVersion()
+
+        guard latest.compare(current, options: .numeric) == .orderedDescending,
+              let asset = rel.assets.first(where: { $0.name.hasSuffix(".dmg") || $0.name.hasSuffix(".zip") })
+        else { return }
+
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = language == "zh"
+                ? "发现新版本 \(latest)"
+                : "New version \(latest) available"
+            alert.informativeText = rel.body ?? ""
+            alert.addButton(withTitle: language == "zh" ? "下载" : "Download")
+            alert.addButton(withTitle: language == "zh" ? "稍后" : "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(URL(string: asset.browser_download_url)!)
+            }
+        }
+    }.resume()
+}
 
 // 引入用于异步加载图片
 import Foundation
 
 struct ContentView: View {
-@State private var isAuthorized: Bool = false
-@State private var showAuthSheet: Bool = false
-    /// 允许运行的硬件 UUID（IOPlatformUUID）白名单；填入你授权的机器 ID
-    let allowedDeviceIDs: Set<String> = [
-        "E6FC82AE-6F91-54AD-9470-D1947E4A1AF5",
-        "355C40D6-B01B-59DF-923E-D89D7270BD20" // 示例
-    ]
 @State private var urlText: String = ""
 @State private var output: String = "请粘贴视频链接"
 @State private var downloadProgress: Double = 0.0
@@ -439,19 +480,6 @@ var body: some View {
     .frame(width: 620)
     .frame(minHeight: 580)
     .onAppear {
-        // ===== 授权检测 =====
-        let deviceID = currentDeviceID()
-        if !allowedDeviceIDs.contains(deviceID) {
-            // 显示弹窗并退出
-            let alert = NSAlert()
-            alert.messageText = "未授权的设备"
-            alert.informativeText = "此应用仅限授权硬件使用。\n设备 ID: \(deviceID)"
-            alert.alertStyle = .critical
-            alert.addButton(withTitle: "退出")
-            alert.runModal()
-            NSApplication.shared.terminate(nil)
-            return
-        }
         try? FileManager.default.createDirectory(at: ContentView.appSupportCookiesDir, withIntermediateDirectories: true)
         requestNotificationPermission()
         setupClipboardMonitoring()
@@ -470,6 +498,8 @@ var body: some View {
 
         detectPremiumCookies()
         loadSupportedSites()
+// 自动检查 GitHub 最新版本
+        checkForUpdates(language: self.language)
         // 显示欢迎页（每次都弹出）
         self.showWelcomeSheet = true          // always show on every launch
     }
@@ -499,6 +529,153 @@ var body: some View {
 }
 
 // ====== 逻辑实现区域 ======
+
+// MARK: - GitHub 更新检查与自动替换
+/// 检查 GitHub 最新版本并自动下载、替换、重启
+fileprivate func checkForUpdates(owner: String = "mjk0108",
+                                 repo: String = "JianZheDownloader",
+                                 language: String = "zh")
+{
+    guard let api = URL(string:
+        "https://api.github.com/repos/\(owner)/\(repo)/releases/latest") else { return }
+
+    URLSession.shared.dataTask(with: api) { data, _, _ in
+        guard
+            let data = data,
+            let rel  = try? JSONDecoder().decode(GHRelease.self, from: data)
+        else { return }
+
+        let latest  = rel.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let current = currentAppVersion()
+
+        guard latest.compare(current, options: .numeric) == .orderedDescending,
+              let asset = rel.assets
+                   .first(where:{ $0.name.hasSuffix(".dmg") || $0.name.hasSuffix(".zip") })
+        else { return }
+
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = language == "zh"
+                ? "发现新版本 \(latest)"
+                : "New version \(latest) available"
+            alert.informativeText = language == "zh"
+                ? "是否下载并自动更新？"
+                : "Download and install now?"
+            alert.addButton(withTitle: language == "zh" ? "更新" : "Update")
+            alert.addButton(withTitle: language == "zh" ? "稍后" : "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                downloadAndInstallUpdate(from: asset.browser_download_url,
+                                         latest: latest,
+                                         language: language)
+            }
+        }
+    }.resume()
+}
+
+/// 下载 ZIP / DMG 并在退出后用 shell 覆盖旧版 .app，再自动启动
+fileprivate func downloadAndInstallUpdate(from urlString: String,
+                                          latest: String,
+                                          language: String)
+{
+    guard let url = URL(string: urlString) else { return }
+    let tmpDir  = URL(fileURLWithPath: NSTemporaryDirectory())
+    let destURL = tmpDir.appendingPathComponent(url.lastPathComponent)
+
+    let alert = NSAlert()
+    alert.messageText = language == "zh" ? "开始下载…" : "Downloading…"
+    alert.informativeText = urlString
+    alert.runModal()
+
+    let task = URLSession.shared.downloadTask(with: url) { loc, _, err in
+        guard let loc = loc, err == nil else { return }
+        try? FileManager.default.removeItem(at: destURL)
+        try? FileManager.default.moveItem(at: loc, to: destURL)
+
+        // 如果是 zip，解压
+        var extractedApp: URL?
+        if destURL.pathExtension.lowercased() == "zip" {
+            let unzipDir = tmpDir.appendingPathComponent("update_extract")
+            try? FileManager.default.removeItem(at: unzipDir)
+            try? FileManager.default.createDirectory(at: unzipDir,
+                                                     withIntermediateDirectories: true)
+            let unzip = Process()
+            unzip.launchPath = "/usr/bin/unzip"
+            unzip.arguments  = ["-qq", destURL.path, "-d", unzipDir.path]
+            try? unzip.run(); unzip.waitUntilExit()
+            // 找到第一个 .app
+            if let app = try? FileManager.default.contentsOfDirectory(at: unzipDir,
+                    includingPropertiesForKeys: nil,
+                    options: .skipsHiddenFiles).first(where:{ $0.pathExtension == "app" }) {
+                extractedApp = app
+            }
+        } else if destURL.pathExtension.lowercased() == "dmg" {
+            // 挂载 dmg
+            let attach = Process()
+            attach.launchPath = "/usr/bin/hdiutil"
+            attach.arguments  = ["attach", "-nobrowse", "-quiet", destURL.path]
+            let pipe = Pipe()
+            attach.standardOutput = pipe
+            try? attach.run(); attach.waitUntilExit()
+            if let mountPath = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                                      encoding: .utf8)?
+               .split(separator: "\t").last.map(String.init) {
+                // 搜索挂载点里的 .app
+                if let app = try? FileManager.default.contentsOfDirectory(
+                        at: URL(fileURLWithPath: mountPath),
+                        includingPropertiesForKeys: nil,
+                        options: .skipsHiddenFiles).first(where:{ $0.pathExtension == "app"}) {
+                    extractedApp = app
+                }
+            }
+        }
+
+        guard let newAppURL = extractedApp else { return }
+        let bundleName  = Bundle.main.bundleURL.lastPathComponent  // 极简下载器.app
+        let installPath = "/Applications/\(bundleName)"
+
+        // 构造 shell：等待旧进程退出→覆盖→启动新版
+        let script = """
+        sleep 1
+        rm -rf "\(installPath)"
+        ditto --noqtn "\(newAppURL.path)" "\(installPath)"
+        open "\(installPath)"
+        """
+
+        let sh = Process()
+        sh.launchPath = "/bin/sh"
+        sh.arguments  = ["-c", script]
+        try? sh.run()
+
+        DispatchQueue.main.async {
+            let done = NSAlert()
+            done.messageText = language == "zh"
+                 ? "下载完成，正在更新到 \(latest)…"
+                 : "Downloaded. Installing \(latest)…"
+            done.informativeText = language == "zh"
+                 ? "应用将自动重启完成更新。"
+                 : "The app will relaunch automatically."
+            done.runModal()
+            // 退出当前 App
+            NSApp.terminate(nil)
+        }
+    }
+    task.resume()
+}
+
+// MARK: - GitHub Release 结构体与版本号辅助
+fileprivate struct GHRelease: Decodable {
+    let tag_name: String
+    let assets: [GHAsset]
+}
+fileprivate struct GHAsset: Decodable {
+    let name: String
+    let browser_download_url: String
+}
+/// 获取当前 App 版本号
+fileprivate func currentAppVersion() -> String {
+    let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    return v.trimmingCharacters(in: .whitespacesAndNewlines)
+}
 func updateSelectedFormat()
 {
     // 若用户未手动选择，始终用最高画质回退
@@ -1728,6 +1905,9 @@ var body: some View {
             HStack {
                 Button(language == "zh" ? "检查依赖" : "Check Dependencies") {
                     self.onCheckDependencies()
+                }
+                Button(language == "zh" ? "检查更新" : "Check Update") {
+                    checkForUpdates(language: language)
                 }
                 Button(language == "zh" ? "清除依赖并重装" : "Reinstall Dependencies") {
                     clearDependencies()
